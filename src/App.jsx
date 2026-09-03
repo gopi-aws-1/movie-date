@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-const generateRoomId = () => `movie-night-${nanoid(6)}`;
+const generateRoomId = () => `gyo-${nanoid(6)}`;
 
 const buildCompositeStream = (sources) => {
   const stream = new MediaStream();
@@ -29,6 +29,7 @@ function App() {
   const [isHost, setIsHost] = useState(true);
   const [status, setStatus] = useState('Ready to start a private screening.');
   const [channelReady, setChannelReady] = useState(false);
+  const [signalingMode, setSignalingMode] = useState('local');
   const [remoteStream, setRemoteStream] = useState(null);
   const [screenStream, setScreenStream] = useState(null);
   const [micStream, setMicStream] = useState(null);
@@ -40,6 +41,7 @@ function App() {
 
   const supabase = useSupabaseClient();
   const channelRef = useRef(null);
+  const localChannelRef = useRef(null);
   const peerRef = useRef(null);
   const clientId = useMemo(() => nanoid(), []);
 
@@ -67,61 +69,95 @@ function App() {
   useEffect(() => () => cleanupStreams(), [screenStream, micStream, cameraStream]);
 
   useEffect(() => {
-    if (!roomId || !supabase) return;
+    if (!roomId) return;
 
-    const channel = supabase.channel(`room:${roomId}`, {
-      config: {
-        broadcast: { self: false },
-      },
-    });
-
-    channel
-      .on('broadcast', { event: 'signal' }, ({ payload }) => {
-        if (!payload || payload.sender === clientId) return;
-        if (!peerRef.current) {
-          setStatus('Incoming signal detected. Building connection...');
-          createPeer(false);
-        }
-        peerRef.current?.signal(payload.data);
-      })
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          setChannelReady(true);
-          setStatus('Signaling ready. Waiting to connect.');
-        }
+    if (supabase) {
+      setSignalingMode('supabase');
+      const channel = supabase.channel(`room:${roomId}`, {
+        config: {
+          broadcast: { self: false },
+        },
       });
 
-    channelRef.current = channel;
+      channel
+        .on('broadcast', { event: 'signal' }, ({ payload }) => {
+          if (!payload || payload.sender === clientId) return;
+          if (!peerRef.current) {
+            setStatus('Incoming signal detected. Building connection...');
+            createPeer(false);
+          }
+          peerRef.current?.signal(payload.data);
+        })
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            setChannelReady(true);
+            setStatus('Signaling ready. Waiting to connect.');
+          }
+        });
+
+      channelRef.current = channel;
+
+      return () => {
+        channel.unsubscribe();
+        channelRef.current = null;
+        setChannelReady(false);
+      };
+    }
+
+    setSignalingMode('local');
+    const localChannel = new BroadcastChannel(`gyo-${roomId}`);
+    localChannel.onmessage = ({ data }) => {
+      if (!data || data.sender === clientId) return;
+      if (!peerRef.current) {
+        setStatus('Incoming signal detected. Building connection...');
+        createPeer(false);
+      }
+      peerRef.current?.signal(data.data);
+    };
+    setChannelReady(true);
+    setStatus('Local signaling ready. Open another tab with the same room ID.');
+    localChannelRef.current = localChannel;
 
     return () => {
-      channel.unsubscribe();
-      channelRef.current = null;
+      localChannel.close();
+      localChannelRef.current = null;
       setChannelReady(false);
     };
   }, [roomId, supabase, clientId]);
 
   const sendSignal = (data) => {
-    if (!channelRef.current) {
-      setSignalingError('Signaling channel not ready.');
+    if (signalingMode === 'supabase') {
+      if (!channelRef.current) {
+        setSignalingError('Signaling channel not ready.');
+        return;
+      }
+      channelRef.current.send({ type: 'broadcast', event: 'signal', payload: { sender: clientId, data } });
       return;
     }
-    channelRef.current.send({ type: 'broadcast', event: 'signal', payload: { sender: clientId, data } });
+
+    if (!localChannelRef.current) {
+      setSignalingError('Local signaling channel not ready.');
+      return;
+    }
+    localChannelRef.current.postMessage({ sender: clientId, data });
   };
 
   const attachTracksToPeer = (stream) => {
     if (!peerRef.current || !stream) return;
     const senders = peerRef.current._pc?.getSenders?.() || [];
     stream.getTracks().forEach((track) => {
+      // Newly requested media is enabled by the user action that captured it.
+      // Do not read React state here because its setter may not have committed yet.
+      track.enabled = true;
       const alreadyShared = senders.some((sender) => sender.track === track);
       if (!alreadyShared) {
         peerRef.current.addTrack(track, stream);
       }
-      track.enabled = track.kind === 'audio' ? micEnabled || cameraEnabled || screenStream?.getAudioTracks().length : true;
     });
   };
 
-  const createPeer = (initiator) => {
-    const outbound = buildCompositeStream([screenStream, micStream, cameraStream]);
+  const createPeer = (initiator, outboundStream) => {
+    const outbound = outboundStream || buildCompositeStream([screenStream, micStream, cameraStream]);
     const peer = new SimplePeer({
       initiator,
       trickle: false,
@@ -167,7 +203,14 @@ function App() {
   };
 
   const startBroadcast = async () => {
-    if (!channelReady) setStatus('Signaling warming up...');
+    if (!roomId) {
+      setStatus('Create or join a room before broadcasting.');
+      return;
+    }
+    if (!channelReady) {
+      setStatus('Signaling warming up... wait a moment.');
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: 60 },
@@ -178,7 +221,9 @@ function App() {
         track.onended = () => setScreenStream(null);
       });
       if (!peerRef.current) {
-        createPeer(true);
+        // React state updates asynchronously, so pass the captured stream into
+        // the initial offer instead of waiting for screenStream to update.
+        createPeer(true, buildCompositeStream([stream, micStream, cameraStream]));
       } else {
         attachTracksToPeer(stream);
       }
@@ -240,7 +285,7 @@ function App() {
     <div className="min-h-screen bg-surface text-white px-6 py-6 md:px-10">
       <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="text-sm uppercase tracking-[0.25em] text-gray-400">Virtual Cinema</p>
+          <p className="text-sm uppercase tracking-[0.25em] text-gray-400">Gyo</p>
           <h1 className="text-3xl font-bold">Private P2P Theater</h1>
           <p className="text-gray-400 mt-1">Host a watch party with encrypted, peer-to-peer streaming.</p>
         </div>
@@ -255,7 +300,8 @@ function App() {
 
       {supabaseMissing && (
         <div className="mt-6 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-amber-100">
-          Provide VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file to enable signaling.
+          No Supabase keys detected. The app will still work for local testing in multiple tabs on this device. Add
+          VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a .env file to enable remote signaling.
         </div>
       )}
 
@@ -312,21 +358,19 @@ function App() {
             <button
               onClick={startBroadcast}
               className="rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400 disabled:opacity-50"
-              disabled={!isHost || supabaseMissing}
+              disabled={!isHost || !roomId}
             >
               Start Broadcast
             </button>
             <button
               onClick={toggleMic}
               className={`rounded-full px-4 py-2 text-sm font-semibold ${micEnabled ? 'bg-white/15 text-white' : 'bg-white/5 text-gray-300'}`}
-              disabled={supabaseMissing}
             >
               {micEnabled ? 'Mute Mic' : 'Enable Mic'}
             </button>
             <button
               onClick={toggleCamera}
               className={`rounded-full px-4 py-2 text-sm font-semibold ${cameraEnabled ? 'bg-white/15 text-white' : 'bg-white/5 text-gray-300'}`}
-              disabled={supabaseMissing}
             >
               {cameraEnabled ? 'Hide Camera' : 'Enable Camera'}
             </button>
@@ -348,7 +392,6 @@ function App() {
               <button
                 onClick={handleCreateRoom}
                 className="flex-1 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold hover:bg-white/15"
-                disabled={supabaseMissing}
               >
                 Create Room
               </button>
@@ -363,13 +406,13 @@ function App() {
               <input
                 value={roomId}
                 onChange={(e) => setRoomId(e.target.value)}
-                placeholder="movie-night-123"
+                placeholder="gyo-123"
                 className="flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-500 focus:border-accent focus:outline-none"
               />
               <button
                 onClick={handleJoinRoom}
                 className="rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-black hover:bg-emerald-300"
-                disabled={!roomId || supabaseMissing}
+                disabled={!roomId}
               >
                 Join
               </button>
@@ -383,6 +426,7 @@ function App() {
             <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-3 text-sm text-gray-200">
               <p className="text-xs uppercase tracking-wide text-gray-500">Status</p>
               <p className="mt-1 text-white">{status}</p>
+              <p className="mt-1 text-xs text-gray-400">Signaling: {signalingMode === 'supabase' ? 'Supabase Realtime' : 'Local tab-to-tab fallback'}</p>
               {signalingError && <p className="mt-1 text-amber-400">{signalingError}</p>}
             </div>
             <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-3 text-sm text-gray-200">

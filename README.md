@@ -1,6 +1,6 @@
-# Virtual Cinema (Movie Date)
+# Gyo
 
-A private, peer-to-peer "virtual living room" for watching movies with a friend. The host shares a tab (with system audio) and the viewer receives the stream directly via WebRTC while Supabase Realtime handles signaling.
+Gyo is a private, peer-to-peer "virtual living room" for watching movies with a friend. The host shares a tab (with system audio) and the viewer receives the stream directly via WebRTC while Supabase Realtime handles signaling.
 
 ## Features
 - Create or join a private room and share invite links.
@@ -14,11 +14,12 @@ A private, peer-to-peer "virtual living room" for watching movies with a friend.
    ```bash
    npm install
    ```
-2. Provide Supabase credentials by creating `.env`:
+2. (Recommended) Provide Supabase credentials by creating `.env`:
    ```bash
    VITE_SUPABASE_URL=your-project-url
    VITE_SUPABASE_ANON_KEY=your-anon-key
    ```
+   - Without these keys the app still works for local tests using two tabs in the same browser via the built-in BroadcastChannel fallback.
 3. Run the dev server:
    ```bash
    npm run dev
@@ -32,6 +33,7 @@ A private, peer-to-peer "virtual living room" for watching movies with a friend.
 - In window B (viewer), paste the invite link to join the same room.
 - Back in window A, click **Start Broadcast**, choose the Netflix/tab window, and check the **Share tab audio** option when prompted.
 - Confirm window B shows the shared video with audio. Use the mic/camera toggles in both windows to verify voice chat signaling.
+- If you don't have Supabase keys, open two tabs of the same browser. The app will automatically use local tab-to-tab signaling so you can verify screen share and audio without extra setup.
 
 ## Notes
 - Screen sharing requests system audio so your movie audio is forwarded.
