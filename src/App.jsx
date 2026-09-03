@@ -146,16 +146,18 @@ function App() {
     if (!peerRef.current || !stream) return;
     const senders = peerRef.current._pc?.getSenders?.() || [];
     stream.getTracks().forEach((track) => {
+      // Newly requested media is enabled by the user action that captured it.
+      // Do not read React state here because its setter may not have committed yet.
+      track.enabled = true;
       const alreadyShared = senders.some((sender) => sender.track === track);
       if (!alreadyShared) {
         peerRef.current.addTrack(track, stream);
       }
-      track.enabled = track.kind === 'audio' ? micEnabled || cameraEnabled || screenStream?.getAudioTracks().length : true;
     });
   };
 
-  const createPeer = (initiator) => {
-    const outbound = buildCompositeStream([screenStream, micStream, cameraStream]);
+  const createPeer = (initiator, outboundStream) => {
+    const outbound = outboundStream || buildCompositeStream([screenStream, micStream, cameraStream]);
     const peer = new SimplePeer({
       initiator,
       trickle: false,
@@ -219,7 +221,9 @@ function App() {
         track.onended = () => setScreenStream(null);
       });
       if (!peerRef.current) {
-        createPeer(true);
+        // React state updates asynchronously, so pass the captured stream into
+        // the initial offer instead of waiting for screenStream to update.
+        createPeer(true, buildCompositeStream([stream, micStream, cameraStream]));
       } else {
         attachTracksToPeer(stream);
       }
